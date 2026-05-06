@@ -6,86 +6,71 @@ import (
 )
 
 func TestCleanup_RemovesOldEntries(t *testing.T) {
-	path := tempPath(t)
-	s, err := New(path)
+	h, err := New(tempPath(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	now := time.Now()
-	old := now.Add(-60 * 24 * time.Hour) // 60 days ago
-
-	s.mu.Lock()
-	s.data["backup"] = []Entry{
-		{StartedAt: old, Duration: time.Second, ExitCode: 0},
-		{StartedAt: now, Duration: time.Second, ExitCode: 0},
+	old := time.Now().Add(-48 * time.Hour)
+	h.store.Jobs["backup"] = []Entry{
+		{StartedAt: old, Success: true},
+		{StartedAt: time.Now(), Success: true},
 	}
-	s.mu.Unlock()
 
-	removed, err := s.Cleanup(DefaultRetention)
-	if err != nil {
+	if err := h.Cleanup(CleanupOptions{MaxAge: 24 * time.Hour}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if removed != 1 {
-		t.Errorf("expected 1 removed, got %d", removed)
-	}
 
-	entries := s.Get("backup")
-	if len(entries) != 1 {
-		t.Errorf("expected 1 remaining entry, got %d", len(entries))
+	if got := len(h.store.Jobs["backup"]); got != 1 {
+		t.Errorf("expected 1 entry after cleanup, got %d", got)
 	}
 }
 
 func TestCleanup_EnforcesMaxRuns(t *testing.T) {
-	path := tempPath(t)
-	s, err := New(path)
+	h, err := New(tempPath(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
 	now := time.Now()
-	s.mu.Lock()
-	for i := 0; i < 10; i++ {
-		s.data["sync"] = append(s.data["sync"], Entry{
-			StartedAt: now.Add(-time.Duration(i) * time.Minute),
-			Duration:  time.Second,
-			ExitCode:  0,
-		})
+	entries := []Entry{
+		{StartedAt: now.Add(-3 * time.Hour), Success: true},
+		{StartedAt: now.Add(-2 * time.Hour), Success: false},
+		{StartedAt: now.Add(-1 * time.Hour), Success: true},
+		{StartedAt: now, Success: true},
 	}
-	s.mu.Unlock()
+	h.store.Jobs["sync"] = entries
 
-	retention := Retention{MaxAge: 30 * 24 * time.Hour, MaxRuns: 5}
-	removed, err := s.Cleanup(retention)
-	if err != nil {
+	if err := h.Cleanup(CleanupOptions{MaxRunsPerJob: 2}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if removed != 5 {
-		t.Errorf("expected 5 removed, got %d", removed)
+
+	got := h.store.Jobs["sync"]
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
 	}
-	if got := len(s.Get("sync")); got != 5 {
-		t.Errorf("expected 5 remaining entries, got %d", got)
+	// Should retain the two most recent.
+	if !got[0].StartedAt.Equal(now.Add(-1 * time.Hour)) {
+		t.Errorf("unexpected oldest retained entry: %v", got[0].StartedAt)
 	}
 }
 
 func TestCleanup_RemovesJobKeyWhenAllEntriesExpire(t *testing.T) {
-	path := tempPath(t)
-	s, err := New(path)
+	h, err := New(tempPath(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	old := time.Now().Add(-60 * 24 * time.Hour)
-	s.mu.Lock()
-	s.data["stale"] = []Entry{
-		{StartedAt: old, Duration: time.Second, ExitCode: 0},
+	old := time.Now().Add(-72 * time.Hour)
+	h.store.Jobs["prune-me"] = []Entry{
+		{StartedAt: old, Success: true},
 	}
-	s.mu.Unlock()
 
-	_, err = s.Cleanup(DefaultRetention)
-	if err != nil {
+	if err := h.Cleanup(CleanupOptions{MaxAge: 24 * time.Hour}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if entries := s.Get("stale"); len(entries) != 0 {
-		t.Errorf("expected job key to be removed, got %d entries", len(entries))
+
+	if _, exists := h.store.Jobs["prune-me"]; exists {
+		t.Error("expected job key to be removed when all entries expired")
 	}
 }

@@ -1,58 +1,43 @@
 package history
 
-import (
-	"fmt"
-	"time"
-)
+import "time"
 
-// Retention defines how long to keep history entries.
-type Retention struct {
-	MaxAge  time.Duration
-	MaxRuns int
+// CleanupOptions controls how old entries are pruned from the store.
+type CleanupOptions struct {
+	// MaxAge removes entries older than this duration. Zero means no age limit.
+	MaxAge time.Duration
+	// MaxRunsPerJob keeps at most this many recent runs per job. Zero means unlimited.
+	MaxRunsPerJob int
 }
 
-// DefaultRetention keeps 30 days of history and at most 500 runs per job.
-var DefaultRetention = Retention{
-	MaxAge:  30 * 24 * time.Hour,
-	MaxRuns: 500,
-}
+// Cleanup prunes the in-memory store according to opts and persists the result.
+func (h *History) Cleanup(opts CleanupOptions) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
-// Cleanup removes entries from the store that exceed the given retention
-// policy. It returns the number of entries removed.
-func (s *Store) Cleanup(r Retention) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	now := time.Now()
 
-	cutoff := time.Now().Add(-r.MaxAge)
-	removed := 0
+	for job, entries := range h.store.Jobs {
+		filtered := entries[:0]
 
-	for job, entries := range s.data {
-		var kept []Entry
 		for _, e := range entries {
-			if e.StartedAt.After(cutoff) {
-				kept = append(kept, e)
-			} else {
-				removed++
+			if opts.MaxAge > 0 && now.Sub(e.StartedAt) > opts.MaxAge {
+				continue
 			}
+			filtered = append(filtered, e)
 		}
 
-		// Enforce max runs per job (keep the most recent ones).
-		if r.MaxRuns > 0 && len(kept) > r.MaxRuns {
-			excess := len(kept) - r.MaxRuns
-			removed += excess
-			kept = kept[excess:]
+		if opts.MaxRunsPerJob > 0 && len(filtered) > opts.MaxRunsPerJob {
+			// Keep the most recent N entries (entries are stored oldest-first).
+			filtered = filtered[len(filtered)-opts.MaxRunsPerJob:]
 		}
 
-		if len(kept) == 0 {
-			delete(s.data, job)
+		if len(filtered) == 0 {
+			delete(h.store.Jobs, job)
 		} else {
-			s.data[job] = kept
+			h.store.Jobs[job] = filtered
 		}
 	}
 
-	if err := s.persist(); err != nil {
-		return removed, fmt.Errorf("cleanup: persist: %w", err)
-	}
-
-	return removed, nil
+	return h.persist()
 }
