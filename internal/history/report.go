@@ -3,67 +3,68 @@ package history
 import (
 	"fmt"
 	"io"
+	"os"
 	"text/tabwriter"
 	"time"
 )
 
-// Summary holds aggregated statistics for a single job.
+// Summary holds aggregated stats for a single job.
 type Summary struct {
-	JobName     string
-	Total       int
-	Failures    int
-	Timeouts    int
-	AvgDuration time.Duration
+	JobName    string
+	TotalRuns  int
+	Failures   int
+	Timeouts   int
+	LastRun    time.Time
+	LastStatus string
 }
 
-// Summarise computes per-job statistics from the provided entries.
-func Summarise(entries []Entry) []Summary {
-	type agg struct {
-		total, failures, timeouts int
-		totalDur                  time.Duration
-	}
-	m := make(map[string]*agg)
-	for _, e := range entries {
-		a, ok := m[e.JobName]
-		if !ok {
-			a = &agg{}
-			m[e.JobName] = a
-		}
-		a.total++
-		a.totalDur += e.Duration
-		if !e.Success {
-			a.failures++
-		}
-		if e.TimedOut {
-			a.timeouts++
-		}
-	}
+// Summarise returns a Summary for each job found in the store.
+func Summarise(s *Store) []Summary {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	summaries := make([]Summary, 0, len(m))
-	for name, a := range m {
-		avg := time.Duration(0)
-		if a.total > 0 {
-			avg = a.totalDur / time.Duration(a.total)
+	var summaries []Summary
+	for job, entries := range s.data {
+		sum := Summary{JobName: job, TotalRuns: len(entries)}
+		for _, e := range entries {
+			if e.Error != "" {
+				sum.Failures++
+			}
+			if e.TimedOut {
+				sum.Timeouts++
+			}
+			if e.FinishedAt.After(sum.LastRun) {
+				sum.LastRun = e.FinishedAt
+				if e.Error != "" {
+					sum.LastStatus = "FAILED"
+				} else if e.TimedOut {
+					sum.LastStatus = "TIMEOUT"
+				} else {
+					sum.LastStatus = "OK"
+				}
+			}
 		}
-		summaries = append(summaries, Summary{
-			JobName:     name,
-			Total:       a.total,
-			Failures:    a.failures,
-			Timeouts:    a.timeouts,
-			AvgDuration: avg,
-		})
+		summaries = append(summaries, sum)
 	}
 	return summaries
 }
 
-// PrintReport writes a formatted summary table to w.
-func PrintReport(w io.Writer, entries []Entry) error {
-	summaries := Summarise(entries)
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "JOB\tRUNS\tFAILURES\tTIMEOUTS\tAVG DURATION")
-	for _, s := range summaries {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\n",
-			s.JobName, s.Total, s.Failures, s.Timeouts, s.AvgDuration.Round(time.Millisecond))
+// PrintReport writes a human-readable report table to w.
+// If w is nil, os.Stdout is used.
+func PrintReport(s *Store, w io.Writer) {
+	if w == nil {
+		w = os.Stdout
 	}
-	return tw.Flush()
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "JOB\tTOTAL\tFAILURES\tTIMEOUTS\tLAST RUN\tLAST STATUS")
+	fmt.Fprintln(tw, "---\t-----\t--------\t--------\t--------\t-----------")
+	for _, sum := range Summarise(s) {
+		lastRun := "-"
+		if !sum.LastRun.IsZero() {
+			lastRun = sum.LastRun.Format(time.RFC3339)
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\t%s\n",
+			sum.JobName, sum.TotalRuns, sum.Failures, sum.Timeouts, lastRun, sum.LastStatus)
+	}
+	tw.Flush()
 }
