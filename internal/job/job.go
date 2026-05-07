@@ -59,3 +59,17 @@ func (r *Run) IsTimedOut(timeoutSecs int) bool {
 	}
 	return time.Since(r.StartedAt).Seconds() > float64(timeoutSecs)
 }
+
+// IsCompleted returns true if the run has finished, regardless of outcome.
+func (r *Run) IsCompleted() bool {
+	return r.FinishedAt != nil
+}
+
+// Duration returns the elapsed time of the run. If the run is still in
+// progress, it returns the time elapsed since it started.
+func (r *Run) Duration() time.Duration {
+	if r.FinishedAt != nil {
+		return r.FinishedAt.Sub(r.StartedAt)
+	}
+	return time.Since(r.StartedAt)
+}
