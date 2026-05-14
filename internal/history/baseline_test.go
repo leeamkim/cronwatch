@@ -95,3 +95,14 @@ func TestBaseline_IsAnomalous(t *testing.T) {
 		t.Error("expected not anomalous for 15s vs avg 10s at 2x threshold")
 	}
 }
+
+func TestBaseline_IsAnomalous_ZeroAvg(t *testing.T) {
+	// A zero average duration should never be considered anomalous regardless
+	// of the observed duration, since there is no meaningful baseline to compare
+	// against.
+	b := &Baseline{AvgDuration: 0}
+
+	if b.IsAnomalous(5*time.Second, 2.0) {
+		t.Error("expected not anomalous when avg duration is zero")
+	}
+}
